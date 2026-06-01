@@ -167,12 +167,6 @@ directory (default `.\snapshot\`):
 Both files are plain JSON. Inspect them in a text editor before sharing if
 you want to confirm there is nothing your organisation considers sensitive.
 
-### Returning the snapshot
-
-Send `tenant-data.json` to your assessor over whatever channel you have
-agreed (secure email, OneDrive link, Teams). The raw companion file is
-optional — include it only if the assessor asks for it.
-
 ---
 
 ## Troubleshooting
