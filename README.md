@@ -2,7 +2,7 @@
 
 `Collect-TenantData.ps1` is a single-file, read-only Microsoft Graph data
 collector. Run it against your Entra ID (Azure AD) tenant to produce a JSON
-snapshot that your security assessor evaluates offline. **No tenant
+snapshot. **No tenant
 configuration is modified.**
 
 This script is intentionally self-contained — you only need this file (and
@@ -39,8 +39,7 @@ Configuration data only:
   directly relevant to a finding (privileged role holders, break-glass
   accounts, a small sample of risky users)
 
-You can open the output JSON in any text editor before sharing it with the
-assessor.
+You can open the output JSON in any text editor to review.
 
 ---
 
@@ -161,7 +160,7 @@ directory (default `.\snapshot\`):
 
 | File | Purpose |
 |------|---------|
-| `tenant-data.json`     | The **normalized snapshot** — return this file to your assessor. |
+| `tenant-data.json`     | The **normalized snapshot** |
 | `tenant-data-raw.json` | Optional companion: raw per-endpoint Graph responses, useful for triage. |
 
 Both files are plain JSON. Inspect them in a text editor before sharing if
@@ -182,10 +181,6 @@ you want to confirm there is nothing your organisation considers sensitive.
 | `adminConsentRequestPolicy` warning about an Entra ID P1 / P2 licence | The endpoint is licence-gated. The collector records the policy as `unavailable=true` so the rule that depends on it does not raise a false positive. |
 | `roleManagementPolicyAssignments` warning | PIM role-policy collection requires Entra ID P2 plus `RoleManagement.Read.Directory`. Findings in the PIM hygiene category will be omitted on tenants without P2. |
 | The script takes several minutes on a large tenant | Service-principal enumeration is `O(n)` per app — this is expected on tenants with many Enterprise Applications and is unrelated to errors. |
-
-If you hit a problem not covered above, capture the full console output
-(including the red `==== COLLECTOR FAILURE ====` block if present) and send
-it to your assessor along with any warnings printed during the run.
 
 ---
 
