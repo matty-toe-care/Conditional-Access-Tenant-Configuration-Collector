@@ -284,10 +284,19 @@ function Get-CredentialEnvelope {
         Tolerant of both IDictionary (the shape Invoke-MgGraphRequest returns)
         and PSCustomObject - direct member access works for both under
         StrictMode v1.0; absent fields evaluate to $null.
+
+        Classifies each credential as platform-managed when its displayName
+        matches a well-known Microsoft pattern, or when the owning principal
+        is tagged as an App Proxy app. Platform-managed credentials are
+        rotated through the Enterprise Applications blade (SAML SSO) or
+        Microsoft directly (App Proxy connector), not via App Registrations,
+        so the user-managed credential rules (WI-003/004/005/007) suppress
+        them via an isSystemManaged guard.
     #>
     param(
         [Parameter(Mandatory)][object]$Entry,
-        [Parameter(Mandatory)][ValidateSet('secret','certificate')][string]$Type
+        [Parameter(Mandatory)][ValidateSet('secret','certificate')][string]$Type,
+        [string[]]$OwnerTags
     )
 
     $start  = $Entry.startDateTime
@@ -310,15 +319,47 @@ function Get-CredentialEnvelope {
         $lifetimeDays = [int][math]::Floor(($expiryDt - $startDt).TotalDays)
     }
 
+    # --- Platform-managed credential classification -------------------------
+    # Microsoft auto-generates SAML SSO signing certificates with the literal
+    # CN 'Microsoft Azure Federated SSO Certificate' (3-year default lifetime)
+    # and App Proxy connector certificates with 'Microsoft Azure Application
+    # Proxy' in the CN. App Proxy-published SPs additionally carry the tag
+    # 'WindowsAzureActiveDirectoryOnPremApp'. Customer-uploaded credentials
+    # use customer-controlled subjects (their domain / app name), never the
+    # 'CN=Microsoft Azure ' prefix Microsoft reserves for platform certs.
+    $dn = [string]$Entry.displayName
+    $isSystemManaged = $false
+    $systemManagedSource = $null
+    if ($dn -like 'CN=Microsoft Azure Federated SSO*') {
+        $isSystemManaged = $true
+        $systemManagedSource = 'samlSso'
+    }
+    elseif ($dn -like 'CN=Microsoft Azure Application Proxy*') {
+        $isSystemManaged = $true
+        $systemManagedSource = 'appProxy'
+    }
+    elseif ($OwnerTags -and ($OwnerTags -contains 'WindowsAzureActiveDirectoryOnPremApp')) {
+        $isSystemManaged = $true
+        $systemManagedSource = 'appProxy'
+    }
+    elseif ($dn -like 'CN=Microsoft Azure *') {
+        # Catch-all for other platform-managed certs Microsoft issues with the
+        # reserved 'Microsoft Azure' CN prefix (e.g. publisher-domain proofs).
+        $isSystemManaged = $true
+        $systemManagedSource = 'platform'
+    }
+
     [ordered]@{
-        keyId           = $Entry.keyId
-        type            = $Type
-        displayName     = $Entry.displayName
-        startDate       = ConvertTo-Iso8601 $startDt
-        expiryDate      = ConvertTo-Iso8601 $expiryDt
-        isExpired       = [bool]$isExpired
-        daysUntilExpiry = $daysUntilExpiry
-        lifetimeDays    = $lifetimeDays
+        keyId               = $Entry.keyId
+        type                = $Type
+        displayName         = $Entry.displayName
+        startDate           = ConvertTo-Iso8601 $startDt
+        expiryDate          = ConvertTo-Iso8601 $expiryDt
+        isExpired           = [bool]$isExpired
+        daysUntilExpiry     = $daysUntilExpiry
+        lifetimeDays        = $lifetimeDays
+        isSystemManaged     = [bool]$isSystemManaged
+        systemManagedSource = $systemManagedSource
     }
 }
 
@@ -2041,6 +2082,38 @@ function Get-ServicePrincipalsAndApps {
         -Uri 'https://graph.microsoft.com/v1.0/applications?$select=id,appId,displayName,signInAudience,publisherDomain,requiredResourceAccess,passwordCredentials,keyCredentials&$top=200'
     $script:RawData.applications = $appsRaw
 
+    # ---- Federated Identity Credentials (per application) ----
+    # FIC = Workload Identity Federation. Each FIC entry lets an external IdP
+    # (GitHub Actions, Kubernetes, App Proxy, another tenant, ...) authenticate
+    # to this app via an OIDC token instead of a client secret. We surface
+    # FIC metadata for context (rules can use federatedCredentialsCount > 0 to
+    # signal that secrets/certs on the app may be vestigial).
+    Write-Section 'Federated Identity Credentials (per application)'
+    $ficByApp = @{}
+    foreach ($a in $appsRaw) {
+        $appObjId = [string]$a.id
+        if (-not $appObjId) { continue }
+        try {
+            $ficRaw = Invoke-MgGraphRequestAllPages -Uri "https://graph.microsoft.com/v1.0/applications/$appObjId/federatedIdentityCredentials"
+        } catch {
+            Add-Warning "Failed to read federatedIdentityCredentials for application '$($a.displayName)': $($_.Exception.Message)"
+            $ficRaw = @()
+        }
+        $ficByApp[$appObjId] = @(
+            foreach ($f in @($ficRaw)) {
+                [ordered]@{
+                    id          = [string]$f.id
+                    name        = [string]$f.name
+                    issuer      = [string]$f.issuer
+                    subject     = [string]$f.subject
+                    audiences   = @($f.audiences)
+                    description = [string]$f.description
+                }
+            }
+        )
+    }
+    $script:RawData.federatedIdentityCredentialsByApp = $ficByApp
+
     # ---- Normalize service principals ----
     $servicePrincipals = foreach ($sp in $spsRaw) {
         $permissions = New-Object System.Collections.Generic.List[object]
@@ -2089,8 +2162,8 @@ function Get-ServicePrincipalsAndApps {
         }
 
         $credentials = New-Object System.Collections.Generic.List[object]
-        foreach ($pc in @($sp.passwordCredentials)) { $credentials.Add((Get-CredentialEnvelope -Entry $pc -Type 'secret')) | Out-Null }
-        foreach ($kc in @($sp.keyCredentials))      { $credentials.Add((Get-CredentialEnvelope -Entry $kc -Type 'certificate')) | Out-Null }
+        foreach ($pc in @($sp.passwordCredentials)) { $credentials.Add((Get-CredentialEnvelope -Entry $pc -Type 'secret'      -OwnerTags @($sp.tags))) | Out-Null }
+        foreach ($kc in @($sp.keyCredentials))      { $credentials.Add((Get-CredentialEnvelope -Entry $kc -Type 'certificate' -OwnerTags @($sp.tags))) | Out-Null }
 
         $homeSame = $null
         if ($sp.appOwnerOrganizationId -and $TenantId) {
@@ -2138,14 +2211,18 @@ function Get-ServicePrincipalsAndApps {
         foreach ($pc in @($a.passwordCredentials)) { $creds.Add((Get-CredentialEnvelope -Entry $pc -Type 'secret')) | Out-Null }
         foreach ($kc in @($a.keyCredentials))      { $creds.Add((Get-CredentialEnvelope -Entry $kc -Type 'certificate')) | Out-Null }
 
+        $fic = @($ficByApp[[string]$a.id])
+
         [ordered]@{
-            id                   = $a.id
-            appId                = $a.appId
-            displayName          = $a.displayName
-            signInAudience       = $a.signInAudience
-            publisherDomain      = $a.publisherDomain
-            requestedPermissions = $reqPerms.ToArray()
-            credentials          = $creds.ToArray()
+            id                        = $a.id
+            appId                     = $a.appId
+            displayName               = $a.displayName
+            signInAudience            = $a.signInAudience
+            publisherDomain           = $a.publisherDomain
+            requestedPermissions      = $reqPerms.ToArray()
+            credentials               = $creds.ToArray()
+            federatedCredentials      = $fic
+            federatedCredentialsCount = $fic.Count
         }
     }
 
